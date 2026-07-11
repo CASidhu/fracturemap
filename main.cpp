@@ -134,8 +134,8 @@ struct Mesh {
 	std::vector<glm::vec3> normals;
 };
 
-// High-resolution subdivided cube grid allowing localized carving modifications
-static Mesh makeTessellatedCube(int subdivisions = 40) {
+// High-density subdivided cube grid allowing high-resolution carving details
+static Mesh makeTessellatedCube(int subdivisions = 64) {
 	Mesh m;
 	float s = 0.65f;
 	auto generateFace = [&](glm::vec3 normal, glm::vec3 up, glm::vec3 right) {
@@ -165,7 +165,7 @@ static Mesh makeTessellatedCube(int subdivisions = 40) {
 	return m;
 }
 
-static Mesh makeSphere(int lat = 50, int lon = 50, float radius = 0.85f) {
+static Mesh makeSphere(int lat = 80, int lon = 80, float radius = 0.85f) {
 	Mesh m;
 	constexpr float PI = 3.14159265358979f;
 	auto point = [&](float theta, float phi) {
@@ -183,7 +183,7 @@ static Mesh makeSphere(int lat = 50, int lon = 50, float radius = 0.85f) {
 	return m;
 }
 
-static Mesh makeTorus(int rings = 60, int sides = 30, float R = 0.6f, float r = 0.25f) {
+static Mesh makeTorus(int rings = 100, int sides = 50, float R = 0.6f, float r = 0.25f) {
 	Mesh m;
 	constexpr float TWO_PI = 6.28318530718f;
 	auto vertex = [&](float u, float v, glm::vec3& pos, glm::vec3& normal) {
@@ -206,7 +206,7 @@ static Mesh makeTorus(int rings = 60, int sides = 30, float R = 0.6f, float r = 
 }
 
 //------------------------------------------------------------------------------
-// Procedural Fracture Tree Generator
+// Procedural Fracture Tree Path Generator
 //------------------------------------------------------------------------------
 static void generateBranch(std::vector<std::vector<glm::vec3>>& paths, glm::vec3 startPt, glm::vec3 dir, int steps, int shapeType, float jitter) {
 	std::vector<glm::vec3> currentPath;
@@ -234,7 +234,7 @@ static void generateBranch(std::vector<std::vector<glm::vec3>>& paths, glm::vec3
 		glm::vec3 sideDir = glm::normalize(glm::cross(currDir, norm));
 		currDir = glm::normalize(currDir + sideDir * r1 * 0.35f * jitter);
 
-		glm::vec3 nextPt = curr + currDir * 0.04f;
+		glm::vec3 nextPt = curr + currDir * 0.035f;
 		nextPt = projectToSurface(nextPt, shapeType);
 
 		currentPath.push_back(nextPt);
@@ -249,31 +249,49 @@ static void generateBranch(std::vector<std::vector<glm::vec3>>& paths, glm::vec3
 	paths.push_back(currentPath);
 }
 
-// Subtraction/Carving function carving deep into the topology of the host mesh
-static void carveBooleanDifference(Mesh& active, const Mesh& pristine, glm::vec3 hitPoint, int numArms, int shapeType, float width, float depth, float jitter) {
+// Stage 1: Build a dedicated dark preview geometry that acts as the model line trace[cite: 5]
+static Mesh buildOverlayMeshFromPaths(const std::vector<std::vector<glm::vec3>>& paths, int shapeType, float width, float depth) {
+	Mesh m;
+	for (const auto& path : paths) {
+		if (path.size() < 2) continue;
+		std::vector<glm::vec3> leftSide, rightSide, valleyFloor;
+
+		for (size_t i = 0; i < path.size(); ++i) {
+			glm::vec3 p = path[i];
+			glm::vec3 n = glm::normalize(p);
+			if (shapeType == 0) {
+				if (std::abs(p.x) > 0.64f) n = glm::vec3(p.x > 0 ? 1 : -1, 0, 0);
+				else if (std::abs(p.y) > 0.64f) n = glm::vec3(0, p.y > 0 ? 1 : -1, 0);
+				else n = glm::vec3(0, 0, p.z > 0 ? 1 : -1);
+			}
+			glm::vec3 forward = (i == 0) ? glm::normalize(path[i + 1] - p) : glm::normalize(p - path[i - 1]);
+			glm::vec3 t = glm::normalize(glm::cross(forward, n));
+
+			// Offset slightly outward from surface normal to prevent depth test artifacts
+			leftSide.push_back(p - t * (width * 0.5f) + n * 0.003f);
+			rightSide.push_back(p + t * (width * 0.5f) + n * 0.003f);
+			valleyFloor.push_back(p - n * (depth * 0.2f) + n * 0.001f);
+		}
+
+		for (size_t i = 0; i < path.size() - 1; ++i) {
+			m.verts.insert(m.verts.end(), {leftSide[i], valleyFloor[i], leftSide[i+1], valleyFloor[i], valleyFloor[i+1], leftSide[i+1]});
+			glm::vec3 nl = glm::normalize(glm::cross(valleyFloor[i] - leftSide[i], leftSide[i+1] - leftSide[i]));
+			m.normals.insert(m.normals.end(), {nl, nl, nl, nl, nl, nl});
+
+			m.verts.insert(m.verts.end(), {valleyFloor[i], rightSide[i], valleyFloor[i+1], rightSide[i], rightSide[i+1], valleyFloor[i+1]});
+			glm::vec3 nr = glm::normalize(glm::cross(rightSide[i+1] - rightSide[i], valleyFloor[i] - rightSide[i]));
+			m.normals.insert(m.normals.end(), {nr, nr, nr, nr, nr, nr});
+		}
+	}
+	return m;
+}
+
+// Stage 2: Physically carve and indent the high-resolution topology on baking command[cite: 5]
+static void carveHostMeshFromPaths(Mesh& active, const Mesh& pristine, const std::vector<std::vector<glm::vec3>>& paths, float width, float depth) {
 	active = pristine;
-	std::vector<std::vector<glm::vec3>> paths;
-	constexpr float TWO_PI = 6.28318530718f;
-
-	glm::vec3 norm = glm::normalize(hitPoint);
-	if (shapeType == 0) {
-		if (std::abs(hitPoint.x) > 0.64f) norm = glm::vec3(hitPoint.x > 0 ? 1 : -1, 0, 0);
-		else if (std::abs(hitPoint.y) > 0.64f) norm = glm::vec3(0, hitPoint.y > 0 ? 1 : -1, 0);
-		else norm = glm::vec3(0, 0, hitPoint.z > 0 ? 1 : -1);
-	}
-	glm::vec3 helper = std::abs(norm.y) < 0.9f ? glm::vec3(0, 1, 0) : glm::vec3(1, 0, 0);
-	glm::vec3 tangentX = glm::normalize(glm::cross(norm, helper));
-	glm::vec3 tangentY = glm::cross(norm, tangentX);
-
-	for (int i = 0; i < numArms; ++i) {
-		float angle = (i * TWO_PI) / numArms;
-		glm::vec3 armDir = glm::normalize(tangentX * std::cos(angle) + tangentY * std::sin(angle));
-		generateBranch(paths, hitPoint, armDir, 30, shapeType, jitter);
-	}
-
 	float radius = width * 0.5f;
+	if (paths.empty()) return;
 
-	// Loop through mesh coordinates and modify them to match the intersection tree footprint
 	for (size_t v = 0; v < active.verts.size(); ++v) {
 		glm::vec3& vert = active.verts[v];
 		glm::vec3 vNorm = active.normals[v];
@@ -294,11 +312,11 @@ static void carveBooleanDifference(Mesh& active, const Mesh& pristine, glm::vec3
 
 		if (minDst < radius) {
 			float falloff = 1.0f - (minDst / radius);
-			vert -= vNorm * (depth * falloff); // Subtract volume relative to face normal
+			vert -= vNorm * (depth * falloff); // Inward normal deformation vector
 		}
 	}
 
-	// Recompute surface shading face normals across carved crevices
+	// Compute high-fidelity smooth shading normals over the freshly cut channels
 	for (size_t i = 0; i < active.verts.size(); i += 3) {
 		glm::vec3 v0 = active.verts[i];
 		glm::vec3 v1 = active.verts[i+1];
@@ -309,7 +327,7 @@ static void carveBooleanDifference(Mesh& active, const Mesh& pristine, glm::vec3
 }
 
 //------------------------------------------------------------------------------
-// Shader Utilities
+// Shader Setup Utilities
 //------------------------------------------------------------------------------
 static GLuint compileShader(GLenum type, const char* src) {
 	GLuint s = glCreateShader(type);
@@ -345,7 +363,7 @@ static GLuint linkProgram(const char* vsrc, const char* fsrc) {
 }
 
 //------------------------------------------------------------------------------
-// GPU upload
+// GPU Management
 //------------------------------------------------------------------------------
 struct GPUMesh {
 	GLuint vao = 0, vboPos = 0, vboNorm = 0, ebo = 0;
@@ -399,36 +417,7 @@ static GPUMesh uploadMesh(const Mesh& m) {
 }
 
 //------------------------------------------------------------------------------
-// Shader Definitions
-//------------------------------------------------------------------------------
-static const char* VERT_SRC = R"(#version 300 es
-layout(location = 0) in vec3 aPos;
-layout(location = 1) in vec3 aNormal;
-uniform mat4 M; uniform mat4 V; uniform mat4 P;
-out vec3 vNormal; out vec3 vFragPos;
-void main() {
-	vFragPos = vec3(M * vec4(aPos, 1.0));
-	vNormal = mat3(transpose(inverse(M))) * aNormal;
-	gl_Position = P * V * M * vec4(aPos, 1.0);
-}
-)";
-
-static const char* FRAG_SRC = R"(#version 300 es
-precision highp float;
-in vec3 vNormal; in vec3 vFragPos;
-uniform vec3 lightPos; uniform vec3 lightColor; uniform vec3 diffuseColor; uniform float ambientStrength;
-out vec4 fragColor;
-void main() {
-	vec3 norm = normalize(vNormal);
-	vec3 lightDir = normalize(lightPos - vFragPos);
-	float diff = max(dot(norm, lightDir), 0.0);
-	vec3 result = lightColor * (ambientStrength + diff) * diffuseColor;
-	fragColor = vec4(result, 1.0);
-}
-)";
-
-//------------------------------------------------------------------------------
-// Application Configuration Loop
+// Application Entry and Workspace State
 //------------------------------------------------------------------------------
 struct App {
 	GLFWwindow* window = nullptr;
@@ -436,30 +425,72 @@ struct App {
 
 	GLuint program = 0;
 	Mesh pristineMeshes[3];
-	GPUMesh activeMesh;
-	int shapeIndex = 2; // Default: Torus
+	GPUMesh activeHostMesh;
+	GPUMesh previewCrackMesh;
+	int shapeIndex = 2; // Defaults to Torus
 
-	bool wireframe = true; // Default: Wireframe View
+	bool wireframe = true;
 	bool autoRotate = false;
 	bool dragging = false;
 	double lastX = 0.0, lastY = 0.0;
 
 	glm::vec3 lightPos{2.f, 2.f, 2.f};
 	glm::vec3 lightColor{1.f, 1.f, 1.f};
-	glm::vec3 diffuseColor{0.7f, 0.55f, 0.45f};
+	glm::vec3 diffuseColor{0.7f, 0.58f, 0.48f};
 	float ambient = 0.25f;
 
+	// Profile Configuration Properties
 	int mainArms = 5;
 	float crackWidth = 0.06f;
 	float crackDepth = 0.04f;
 	float crackJitter = 1.0f;
+	glm::vec3 previewColor{0.08f, 0.08f, 0.08f};
+	
 	glm::vec3 activeStrikePoint{0.0f, 0.6f, 0.25f};
+	std::vector<std::vector<glm::vec3>> calculatedPaths;
 
-	void applyCarving() {
-		activeMesh.clear();
+	// Reset host state and update target trace line coordinates
+	void updatePreviewModel() {
+		previewCrackMesh.clear();
+		calculatedPaths.clear();
+
+		// Trace fractal spine framework[cite: 5]
+		constexpr float TWO_PI = 6.28318530718f;
+		glm::vec3 norm = glm::normalize(activeStrikePoint);
+		if (shapeIndex == 0) {
+			if (std::abs(activeStrikePoint.x) > 0.64f) norm = glm::vec3(activeStrikePoint.x > 0 ? 1 : -1, 0, 0);
+			else if (std::abs(activeStrikePoint.y) > 0.64f) norm = glm::vec3(0, activeStrikePoint.y > 0 ? 1 : -1, 0);
+			else norm = glm::vec3(0, 0, activeStrikePoint.z > 0 ? 1 : -1);
+		}
+		glm::vec3 helper = std::abs(norm.y) < 0.9f ? glm::vec3(0, 1, 0) : glm::vec3(1, 0, 0);
+		glm::vec3 tangentX = glm::normalize(glm::cross(norm, helper));
+		glm::vec3 tangentY = glm::cross(norm, tangentX);
+
+		for (int i = 0; i < mainArms; ++i) {
+			float angle = (i * TWO_PI) / mainArms;
+			glm::vec3 armDir = glm::normalize(tangentX * std::cos(angle) + tangentY * std::sin(angle));
+			generateBranch(calculatedPaths, activeStrikePoint, armDir, 28, shapeIndex, crackJitter);
+		}
+
+		// Compile the real-time visual alignment tape overlay
+		Mesh overlay = buildOverlayMeshFromPaths(calculatedPaths, shapeIndex, crackWidth, crackDepth);
+		previewCrackMesh = uploadMesh(overlay);
+
+		// Instantly wipe previous bakes so user tweaks remain dynamic
+		resetHostGeometry();
+	}
+
+	void resetHostGeometry() {
+		activeHostMesh.clear();
+		activeHostMesh = uploadMesh(pristineMeshes[shapeIndex]);
+	}
+
+	// Trigger carving deformation loop across structural vertices[cite: 5]
+	void bakeVolumeCarve() {
+		activeHostMesh.clear();
 		Mesh carved;
-		carveBooleanDifference(carved, pristineMeshes[shapeIndex], activeStrikePoint, mainArms, shapeIndex, crackWidth, crackDepth, crackJitter);
-		activeMesh = uploadMesh(carved);
+		carveHostMeshFromPaths(carved, pristineMeshes[shapeIndex], calculatedPaths, crackWidth, crackDepth);
+		activeHostMesh = uploadMesh(carved);
 	}
 };
 
@@ -492,7 +523,7 @@ static void mouseButtonCB(GLFWwindow* w, int button, int action, int /*mods*/) {
 		if (hit && t >= 0.0f) {
 			glm::vec3 hitPoint = ro + t * rd;
 			app->activeStrikePoint = projectToSurface(hitPoint, app->shapeIndex);
-			app->applyCarving();
+			app->updatePreviewModel();
 		}
 	}
 }
@@ -518,28 +549,40 @@ static void frame(void* arg) {
 
 	ImGui_ImplOpenGL3_NewFrame(); ImGui_ImplGlfw_NewFrame(); ImGui::NewFrame();
 
-	ImGui::Begin("Boolean Fracture Carver");
-	const char* shapes[] = {"Subdivided Cube", "Sphere", "Torus"};
-	if (ImGui::Combo("Host Mesh", &app.shapeIndex, shapes, 3)) {
+	ImGui::Begin("Deformation Workshop");
+	const char* shapes[] = {"Subdivided Cube (64x64)", "Sphere (80x80)", "Torus (100x50)"};
+	if (ImGui::Combo("Host Architecture", &app.shapeIndex, shapes, 3)) {
 		app.activeStrikePoint = projectToSurface(glm::vec3(0.0f, 1.0f, 0.0f), app.shapeIndex);
-		app.applyCarving();
+		app.updatePreviewModel();
 	}
-	ImGui::Checkbox("Wireframe Mode", &app.wireframe);
-	ImGui::Checkbox("Auto-Rotate View", &app.autoRotate);
-	ImGui::ColorEdit3("Object Base Color", &app.diffuseColor[0]);
+	ImGui::Checkbox("Wireframe Matrix", &app.wireframe);
+	ImGui::Checkbox("Auto-Rotate Orbit", &app.autoRotate);
+	ImGui::ColorEdit3("Object Tone", &app.diffuseColor[0]);
 	
 	ImGui::Spacing(); ImGui::Separator();
-	ImGui::Text("Fracture Subtraction Profiles");
+	ImGui::Text("Fracture Configuration");
 	if (ImGui::SliderInt("Primary Arms", &app.mainArms, 2, 10) ||
-		ImGui::SliderFloat("Carve Width", &app.crackWidth, 0.02f, 0.15f) ||
-		ImGui::SliderFloat("Carve Depth", &app.crackDepth, 0.005f, 0.12f) ||
-		ImGui::SliderFloat("Branch Jitter", &app.crackJitter, 0.0f, 2.5f)) {
-		app.applyCarving();
+		ImGui::SliderFloat("Model Width", &app.crackWidth, 0.02f, 0.15f) ||
+		ImGui::SliderFloat("Model Depth", &app.crackDepth, 0.005f, 0.12f) ||
+		ImGui::SliderFloat("Spine Jitter", &app.crackJitter, 0.0f, 2.5f)) {
+		app.updatePreviewModel();
 	}
+	ImGui::ColorEdit3("Trace Overlay Color", &app.previewColor[0]);
+	
+	ImGui::Spacing(); ImGui::Separator();
+	ImGui::TextColored(ImVec4(0.2f, 1.0f, 0.4f, 1.0f), "GEOMETRIC SUBTRACTION:");
+	if (ImGui::Button("Carve Model Volume", ImVec2(-1, 30))) {
+		app.bakeVolumeCarve();
+	}
+	if (ImGui::Button("Clear/Reset Carving", ImVec2(-1, 22))) {
+		app.resetHostGeometry();
+	}
+
 	ImGui::Spacing();
-	ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.0f, 1.0f), "CONTROLS:");
-	ImGui::TextWrapped("1. Drag Left-Click to orbit the camera view.");
-	ImGui::TextWrapped("2. Right-Click on the surface to dynamically carve out a starburst fracture volume.");
+	ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.0f, 1.0f), "WORKFLOW:");
+	ImGui::TextWrapped("1. Right-Click on the surface to instantly trace out a fracture skeleton blueprint[cite: 5].");
+	ImGui::TextWrapped("2. Tweak properties cleanly without latency.");
+	ImGui::TextWrapped("3. Click 'Carve Model Volume' to perform the boolean vertex-carve deformation loop[cite: 5].");
 	ImGui::End();
 
 	if (app.autoRotate) app.camera.incrementPhi(-0.4f);
@@ -562,13 +605,21 @@ static void frame(void* arg) {
 	glUniform3fv(glGetUniformLocation(app.program, "lightPos"), 1, glm::value_ptr(app.lightPos));
 	glUniform3fv(glGetUniformLocation(app.program, "lightColor"), 1, glm::value_ptr(app.lightColor));
 	glUniform1f(glGetUniformLocation(app.program, "ambientStrength"), app.ambient);
-	glUniform3fv(glGetUniformLocation(app.program, "diffuseColor"), 1, glm::value_ptr(app.diffuseColor));
 
-	// Render the carved dynamic target primitive
-	if (app.activeMesh.count > 0) {
-		glBindVertexArray(app.activeMesh.vao);
-		if (app.wireframe) glDrawElements(GL_LINES, app.activeMesh.wireCount, GL_UNSIGNED_INT, (void*)0);
-		else glDrawArrays(GL_TRIANGLES, 0, app.activeMesh.count);
+	// 1. Draw primitive target base mesh
+	glUniform3fv(glGetUniformLocation(app.program, "diffuseColor"), 1, glm::value_ptr(app.diffuseColor));
+	if (app.activeHostMesh.count > 0) {
+		glBindVertexArray(app.activeHostMesh.vao);
+		if (app.wireframe) glDrawElements(GL_LINES, app.activeHostMesh.wireCount, GL_UNSIGNED_INT, (void*)0);
+		else glDrawArrays(GL_TRIANGLES, 0, app.activeHostMesh.count);
+	}
+
+	// 2. Draw live line track preview overlay blueprint[cite: 5]
+	if (app.previewCrackMesh.count > 0) {
+		glUniform3fv(glGetUniformLocation(app.program, "diffuseColor"), 1, glm::value_ptr(app.previewColor));
+		glBindVertexArray(app.previewCrackMesh.vao);
+		if (app.wireframe) glDrawElements(GL_LINES, app.previewCrackMesh.wireCount, GL_UNSIGNED_INT, (void*)0);
+		else glDrawArrays(GL_TRIANGLES, 0, app.previewCrackMesh.count);
 	}
 
 	ImGui::Render(); ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
@@ -581,7 +632,7 @@ int main() {
 	glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 3); glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 0);
 
 	static App app;
-	app.window = glfwCreateWindow(900, 700, "Starburst Boolean Carver", nullptr, nullptr);
+	app.window = glfwCreateWindow(900, 700, "Starburst Boolean Workshop", nullptr, nullptr);
 	if (!app.window) return 1;
 
 	glfwMakeContextCurrent(app.window); glfwSetWindowUserPointer(app.window, &app);
@@ -594,12 +645,12 @@ int main() {
 
 	app.program = linkProgram(VERT_SRC, FRAG_SRC);
 	
-	// Cache pristine reference maps
+	// Cache internal high-fidelity baseline primitives
 	app.pristineMeshes[0] = makeTessellatedCube();
 	app.pristineMeshes[1] = makeSphere();
 	app.pristineMeshes[2] = makeTorus();
 
-	app.applyCarving();
+	app.updatePreviewModel();
 	emscripten_set_main_loop_arg(frame, &app, 0, 1);
 	return 0;
 }
