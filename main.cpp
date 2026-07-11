@@ -121,7 +121,7 @@ static glm::vec3 projectToSurface(glm::vec3 p, int shapeType) {
 		glm::vec2 horizontal(p.x, p.z);
 		if (glm::length(horizontal) < 1e-4f) return glm::vec3(R + r, 0, 0);
 		glm::vec3 coreCirclePt = glm::vec3(glm::normalize(horizontal) * R, 0.0f);
-		coreCirclePt.z = coreCirclePt.y; coreCirclePt.y = 0.0f; // Swap to xz plane
+		coreCirclePt.z = coreCirclePt.y; coreCirclePt.y = 0.0f;
 		return coreCirclePt + glm::normalize(p - coreCirclePt) * r;
 	}
 }
@@ -217,7 +217,6 @@ static void generateBranch(std::vector<std::vector<glm::vec3>>& paths, glm::vec3
 
 		currDir = glm::normalize(currDir - glm::dot(currDir, norm) * norm);
 
-		// Evaluated using double-precision division to satisfy -Wimplicit-const-int-float-conversion
 		float r1 = (float)((double)rand() / (double)RAND_MAX) * 2.0f - 1.0f;
 		glm::vec3 sideDir = glm::normalize(glm::cross(currDir, norm));
 		currDir = glm::normalize(currDir + sideDir * r1 * 0.35f * jitter);
@@ -228,7 +227,6 @@ static void generateBranch(std::vector<std::vector<glm::vec3>>& paths, glm::vec3
 		currentPath.push_back(nextPt);
 		curr = nextPt;
 
-		// 12% probability of growing a sub-arm structural node split[cite: 5]
 		if (i > 2 && i < steps - 3 && ((double)rand() / (double)RAND_MAX) < 0.12 && paths.size() < 16) {
 			float splitAngle = (((double)rand() / (double)RAND_MAX) > 0.5 ? 1.0f : -1.0f) * 0.6f;
 			glm::vec3 subDir = glm::normalize(currDir * std::cos(splitAngle) + sideDir * std::sin(splitAngle));
@@ -243,7 +241,6 @@ static Mesh makeStarburstCracks(glm::vec3 hitPoint, int numMainArms, int shapeTy
 	std::vector<std::vector<glm::vec3>> paths;
 	constexpr float TWO_PI = 6.28318530718f;
 
-	// Establish tangent reference framework relative to localized strike normal
 	glm::vec3 norm = glm::normalize(hitPoint);
 	if (shapeType == 0) {
 		if (std::abs(hitPoint.x) > 0.64f) norm = glm::vec3(hitPoint.x > 0 ? 1 : -1, 0, 0);
@@ -254,14 +251,12 @@ static Mesh makeStarburstCracks(glm::vec3 hitPoint, int numMainArms, int shapeTy
 	glm::vec3 tangentX = glm::normalize(glm::cross(norm, helper));
 	glm::vec3 tangentY = glm::cross(norm, tangentX);
 
-	// Sprout major expansion arms evenly distributed around circumference[cite: 5]
 	for (int i = 0; i < numMainArms; ++i) {
 		float angle = (i * TWO_PI) / numMainArms;
 		glm::vec3 armDir = glm::normalize(tangentX * std::cos(angle) + tangentY * std::sin(angle));
 		generateBranch(paths, hitPoint, armDir, 25, shapeType, jitter);
 	}
 
-	// Tessellate swept profile cross-sections for all generated path branches[cite: 5]
 	for (const auto& path : paths) {
 		if (path.size() < 2) continue;
 		std::vector<glm::vec3> leftSide, rightSide, valleyFloor;
@@ -293,6 +288,42 @@ static Mesh makeStarburstCracks(glm::vec3 hitPoint, int numMainArms, int shapeTy
 		}
 	}
 	return m;
+}
+
+//------------------------------------------------------------------------------
+// Shader Utilities
+//------------------------------------------------------------------------------
+static GLuint compileShader(GLenum type, const char* src) {
+	GLuint s = glCreateShader(type);
+	glShaderSource(s, 1, &src, nullptr);
+	glCompileShader(s);
+	GLint ok = 0;
+	glGetShaderiv(s, GL_COMPILE_STATUS, &ok);
+	if (!ok) {
+		char log[2048];
+		glGetShaderInfoLog(s, sizeof(log), nullptr, log);
+		printf("[shader compile error]\n%s\n", log);
+	}
+	return s;
+}
+
+static GLuint linkProgram(const char* vsrc, const char* fsrc) {
+	GLuint vs = compileShader(GL_VERTEX_SHADER, vsrc);
+	GLuint fs = compileShader(GL_FRAGMENT_SHADER, fsrc);
+	GLuint p = glCreateProgram();
+	glAttachShader(p, vs);
+	glAttachShader(p, fs);
+	glLinkProgram(p);
+	GLint ok = 0;
+	glGetProgramiv(p, GL_LINK_STATUS, &ok);
+	if (!ok) {
+		char log[2048];
+		glGetProgramInfoLog(p, sizeof(log), nullptr, log);
+		printf("[program link error]\n%s\n", log);
+	}
+	glDeleteShader(vs);
+	glDeleteShader(fs);
+	return p;
 }
 
 //------------------------------------------------------------------------------
@@ -350,80 +381,18 @@ static GPUMesh uploadMesh(const Mesh& m) {
 }
 
 //------------------------------------------------------------------------------
-// Shader Setup
-//------------------------------------------------------------------------------
-static const char* VERT_SRC = R"(#version 300 es
-layout(location = 0) in vec3 aPos;
-layout(location = 1) in vec3 aNormal;
-uniform mat4 M; uniform mat4 V; uniform mat4 P;
-out vec3 vNormal; out vec3 vFragPos;
-void main() {
-	vFragPos = vec3(M * vec4(aPos, 1.0));
-	vNormal = mat3(transpose(inverse(M))) * aNormal;
-	gl_Position = P * V * M * vec4(aPos, 1.0);
-}
-)";
-
-static const char* FRAG_SRC = R"(#version 300 es
-precision highp float;
-in vec3 vNormal; in vec3 vFragPos;
-uniform vec3 lightPos; uniform vec3 lightColor; uniform vec3 diffuseColor; uniform float ambientStrength;
-out vec4 fragColor;
-void main() {
-	vec3 norm = normalize(vNormal);
-	vec3 lightDir = normalize(lightPos - vFragPos);
-	float diff = max(dot(norm, lightDir), 0.0);
-	vec3 result = lightColor * (ambientStrength + diff) * diffuseColor;
-	fragColor = vec4(result, 1.0);
-}
-)";
-
-static GLuint compileShader(GLenum type, const char* src) {
-	GLuint s = glCreateShader(type);
-	glShaderSource(s, 1, &src, nullptr);
-	glCompileShader(s);
-	GLint ok = 0;
-	glGetShaderiv(s, GL_COMPILE_STATUS, &ok);
-	if (!ok) {
-		char log[2048];
-		glGetShaderInfoLog(s, sizeof(log), nullptr, log);
-		printf("[shader compile error]\n%s\n", log);
-	}
-	return s;
-}
-
-static GLuint linkProgram(const char* vsrc, const char* fsrc) {
-	GLuint vs = compileShader(GL_VERTEX_SHADER, vsrc);
-	GLuint fs = compileShader(GL_FRAGMENT_SHADER, fsrc);
-	GLuint p = glCreateProgram();
-	glAttachShader(p, vs);
-	glAttachShader(p, fs);
-	glLinkProgram(p);
-	GLint ok = 0;
-	glGetProgramiv(p, GL_LINK_STATUS, &ok);
-	if (!ok) {
-		char log[2048];
-		glGetProgramInfoLog(p, sizeof(log), nullptr, log);
-		printf("[program link error]\n%s\n", log);
-	}
-	glDeleteShader(vs);
-	glDeleteShader(fs);
-	return p;
-}
-
-//------------------------------------------------------------------------------
 // Application Configuration Loop
 //------------------------------------------------------------------------------
 struct App {
 	GLFWwindow* window = nullptr;
-	Camera camera{glm::radians(20.f), glm::radians(35.f), 3.2f};
+	Camera camera{glm::radians(45.f), glm::radians(35.f), 3.2f}; // Default pitch at 45 degrees
 
 	GLuint program = 0;
 	GPUMesh hostMeshes[3];
 	GPUMesh crackMesh;
-	int shapeIndex = 1;
+	int shapeIndex = 2; // Default to Torus (0=Cube, 1=Sphere, 2=Torus)
 
-	bool wireframe = false;
+	bool wireframe = true; // Default to wireframe enabled
 	bool autoRotate = false;
 	bool dragging = false;
 	double lastX = 0.0, lastY = 0.0;
@@ -433,13 +402,12 @@ struct App {
 	glm::vec3 diffuseColor{0.6f, 0.5f, 0.4f};
 	float ambient = 0.2f;
 
-	// Dynamic crack configuration properties
 	int mainArms = 5;
 	float crackWidth = 0.03f;
 	float crackDepth = 0.02f;
 	float crackJitter = 1.0f;
 	glm::vec3 crackColor{0.08f, 0.08f, 0.08f};
-	glm::vec3 activeStrikePoint{0.0f, 0.85f, 0.0f};
+	glm::vec3 activeStrikePoint{0.0f, 0.6f, 0.25f}; // Snapped coordinate component initialization on Torus rim
 
 	void updateCrackGeometry() {
 		crackMesh.clear();
@@ -455,7 +423,6 @@ static void mouseButtonCB(GLFWwindow* w, int button, int action, int /*mods*/) {
 	if (button == GLFW_MOUSE_BUTTON_LEFT) {
 		app->dragging = (action == GLFW_PRESS);
 	} 
-	// Right Click: Fire procedural raycast strike weapon on surface geometry[cite: 5]
 	else if (button == GLFW_MOUSE_BUTTON_RIGHT && action == GLFW_PRESS) {
 		double mx, my;
 		glfwGetCursorPos(w, &mx, &my);
@@ -473,7 +440,7 @@ static void mouseButtonCB(GLFWwindow* w, int button, int action, int /*mods*/) {
 
 		if (app->shapeIndex == 1)      hit = intersectSphere(ro, rd, 0.85f, t);
 		else if (app->shapeIndex == 0) hit = intersectBox(ro, rd, glm::vec3(-0.65f), glm::vec3(0.65f), t);
-		else                           hit = intersectSphere(ro, rd, 0.75f, t); // Torus bounding proxy approximation
+		else                           hit = intersectSphere(ro, rd, 0.75f, t); 
 
 		if (hit && t >= 0.0f) {
 			glm::vec3 hitPoint = ro + t * rd;
