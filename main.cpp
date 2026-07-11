@@ -134,7 +134,6 @@ struct Mesh {
 	std::vector<glm::vec3> normals;
 };
 
-// High-density subdivided cube grid allowing high-resolution carving details
 static Mesh makeTessellatedCube(int subdivisions = 64) {
 	Mesh m;
 	float s = 0.65f;
@@ -249,7 +248,6 @@ static void generateBranch(std::vector<std::vector<glm::vec3>>& paths, glm::vec3
 	paths.push_back(currentPath);
 }
 
-// Stage 1: Build a dedicated dark preview geometry that acts as the model line trace[cite: 5]
 static Mesh buildOverlayMeshFromPaths(const std::vector<std::vector<glm::vec3>>& paths, int shapeType, float width, float depth) {
 	Mesh m;
 	for (const auto& path : paths) {
@@ -267,7 +265,6 @@ static Mesh buildOverlayMeshFromPaths(const std::vector<std::vector<glm::vec3>>&
 			glm::vec3 forward = (i == 0) ? glm::normalize(path[i + 1] - p) : glm::normalize(p - path[i - 1]);
 			glm::vec3 t = glm::normalize(glm::cross(forward, n));
 
-			// Offset slightly outward from surface normal to prevent depth test artifacts
 			leftSide.push_back(p - t * (width * 0.5f) + n * 0.003f);
 			rightSide.push_back(p + t * (width * 0.5f) + n * 0.003f);
 			valleyFloor.push_back(p - n * (depth * 0.2f) + n * 0.001f);
@@ -286,7 +283,6 @@ static Mesh buildOverlayMeshFromPaths(const std::vector<std::vector<glm::vec3>>&
 	return m;
 }
 
-// Stage 2: Physically carve and indent the high-resolution topology on baking command[cite: 5]
 static void carveHostMeshFromPaths(Mesh& active, const Mesh& pristine, const std::vector<std::vector<glm::vec3>>& paths, float width, float depth) {
 	active = pristine;
 	float radius = width * 0.5f;
@@ -312,11 +308,10 @@ static void carveHostMeshFromPaths(Mesh& active, const Mesh& pristine, const std
 
 		if (minDst < radius) {
 			float falloff = 1.0f - (minDst / radius);
-			vert -= vNorm * (depth * falloff); // Inward normal deformation vector
+			vert -= vNorm * (depth * falloff);
 		}
 	}
 
-	// Compute high-fidelity smooth shading normals over the freshly cut channels
 	for (size_t i = 0; i < active.verts.size(); i += 3) {
 		glm::vec3 v0 = active.verts[i];
 		glm::vec3 v1 = active.verts[i+1];
@@ -327,8 +322,34 @@ static void carveHostMeshFromPaths(Mesh& active, const Mesh& pristine, const std
 }
 
 //------------------------------------------------------------------------------
-// Shader Setup Utilities
+// Shader Setup Definitions
 //------------------------------------------------------------------------------
+static const char* VERT_SRC = R"(#version 300 es
+layout(location = 0) in vec3 aPos;
+layout(location = 1) in vec3 aNormal;
+uniform mat4 M; uniform mat4 V; uniform mat4 P;
+out vec3 vNormal; out vec3 vFragPos;
+void main() {
+	vFragPos = vec3(M * vec4(aPos, 1.0));
+	vNormal = mat3(transpose(inverse(M))) * aNormal;
+	gl_Position = P * V * M * vec4(aPos, 1.0);
+}
+)";
+
+static const char* FRAG_SRC = R"(#version 300 es
+precision highp float;
+in vec3 vNormal; in vec3 vFragPos;
+uniform vec3 lightPos; uniform vec3 lightColor; uniform vec3 diffuseColor; uniform float ambientStrength;
+out vec4 fragColor;
+void main() {
+	vec3 norm = normalize(vNormal);
+	vec3 lightDir = normalize(lightPos - vFragPos);
+	float diff = max(dot(norm, lightDir), 0.0);
+	vec3 result = lightColor * (ambientStrength + diff) * diffuseColor;
+	fragColor = vec4(result, 1.0);
+}
+)";
+
 static GLuint compileShader(GLenum type, const char* src) {
 	GLuint s = glCreateShader(type);
 	glShaderSource(s, 1, &src, nullptr);
@@ -439,7 +460,6 @@ struct App {
 	glm::vec3 diffuseColor{0.7f, 0.58f, 0.48f};
 	float ambient = 0.25f;
 
-	// Profile Configuration Properties
 	int mainArms = 5;
 	float crackWidth = 0.06f;
 	float crackDepth = 0.04f;
@@ -449,12 +469,10 @@ struct App {
 	glm::vec3 activeStrikePoint{0.0f, 0.6f, 0.25f};
 	std::vector<std::vector<glm::vec3>> calculatedPaths;
 
-	// Reset host state and update target trace line coordinates
 	void updatePreviewModel() {
 		previewCrackMesh.clear();
 		calculatedPaths.clear();
 
-		// Trace fractal spine framework[cite: 5]
 		constexpr float TWO_PI = 6.28318530718f;
 		glm::vec3 norm = glm::normalize(activeStrikePoint);
 		if (shapeIndex == 0) {
@@ -472,11 +490,9 @@ struct App {
 			generateBranch(calculatedPaths, activeStrikePoint, armDir, 28, shapeIndex, crackJitter);
 		}
 
-		// Compile the real-time visual alignment tape overlay
 		Mesh overlay = buildOverlayMeshFromPaths(calculatedPaths, shapeIndex, crackWidth, crackDepth);
 		previewCrackMesh = uploadMesh(overlay);
 
-		// Instantly wipe previous bakes so user tweaks remain dynamic
 		resetHostGeometry();
 	}
 
@@ -485,7 +501,6 @@ struct App {
 		activeHostMesh = uploadMesh(pristineMeshes[shapeIndex]);
 	}
 
-	// Trigger carving deformation loop across structural vertices[cite: 5]
 	void bakeVolumeCarve() {
 		activeHostMesh.clear();
 		Mesh carved;
