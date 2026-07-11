@@ -31,129 +31,12 @@ extern "C" {
 #endif
 
 //------------------------------------------------------------------------------
-// GLSL Shader Source (Analytical Fragment-Space Boolean Discard/Carve Engine)
+// Geometry Structures
 //------------------------------------------------------------------------------
-static const char* VERT_SRC = R"(#version 300 es
-layout(location = 0) in vec3 aPos;
-layout(location = 1) in vec3 aNormal;
-
-uniform mat4 M;
-uniform mat4 V;
-uniform mat4 P;
-
-out vec3 vNormal;
-out vec3 vFragPos;
-
-void main() {
-	vFragPos = vec3(M * vec4(aPos, 1.0));
-	vNormal = mat3(transpose(inverse(M))) * aNormal;
-	gl_Position = P * V * M * vec4(aPos, 1.0);
-}
-)";
-
-static const char* FRAG_SRC = R"(#version 300 es
-precision highp float;
-
-in vec3 vNormal;
-in vec3 vFragPos;
-
-uniform vec3 lightPos;
-uniform vec3 lightColor;
-uniform vec3 diffuseColor;
-uniform float ambientStrength;
-
-// Analytical Fracture Uniform Arrays
-uniform vec3 uSegA[90];
-uniform vec3 uSegB[90];
-uniform int uSegCount;
-uniform float uCrackWidth;
-uniform float uCrackDepth;
-uniform int uCarveEnabled;
-
-out vec4 fragColor;
-
-void main() {
-	vec3 baseNormal = normalize(vNormal);
-	vec3 baseColor = diffuseColor;
-	
-	if (uCarveEnabled == 1 && uSegCount > 0) {
-		float minDst = 1e9;
-		vec3 closestLinePt = vec3(0.0);
-		
-		// Find closest fracture branch segment in fragment space
-		for (int i = 0; i < uSegCount; ++i) {
-			vec3 a = uSegA[i];
-			vec3 b = uSegB[i];
-			vec3 ab = b - a;
-			vec3 ap = vFragPos - a;
-			float t = clamp(dot(ap, ab) / (dot(ab, ab) + 1e-6), 0.0, 1.0);
-			vec3 closest = a + t * ab;
-			float dst = length(vFragPos - closest);
-			if (dst < minDst) {
-				minDst = dst;
-				closestLinePt = closest;
-			}
-		}
-
-		// Perform Boolean Valley Carving Operations
-		float radius = uCrackWidth * 0.5;
-		if (minDst < radius) {
-			float falloff = 1.0 - (minDst / radius);
-			
-			// Calculate localized slope normal pointing inside the V-groove channel
-			vec3 lateralVec = vFragPos - closestLinePt;
-			if (length(lateralVec) > 1e-5) {
-				lateralVec = normalize(lateralVec);
-			}
-			
-			// Perturb normal vector inwards and darken base texture to shade the valley floor
-			baseNormal = normalize(baseNormal + lateralVec * falloff * 2.0 * uCrackDepth);
-			baseColor = mix(diffuseColor, vec3(0.04), falloff);
-		}
-	}
-
-	vec3 lightDir = normalize(lightPos - vFragPos);
-	float diff = max(dot(baseNormal, lightDir), 0.0);
-	vec3 result = lightColor * (ambientStrength + diff) * baseColor;
-	fragColor = vec4(result, 1.0);
-}
-)";
-
-//------------------------------------------------------------------------------
-// Shader Setup Utilities
-//------------------------------------------------------------------------------
-static GLuint compileShader(GLenum type, const char* src) {
-	GLuint s = glCreateShader(type);
-	glShaderSource(s, 1, &src, nullptr);
-	glCompileShader(s);
-	GLint ok = 0;
-	glGetShaderiv(s, GL_COMPILE_STATUS, &ok);
-	if (!ok) {
-		char log[2048];
-		glGetShaderInfoLog(s, sizeof(log), nullptr, log);
-		printf("[shader compile error]\n%s\n", log);
-	}
-	return s;
-}
-
-static GLuint linkProgram(const char* vsrc, const char* fsrc) {
-	GLuint vs = compileShader(GL_VERTEX_SHADER, vsrc);
-	GLuint fs = compileShader(GL_FRAGMENT_SHADER, fsrc);
-	GLuint p = glCreateProgram();
-	glAttachShader(p, vs);
-	glAttachShader(p, fs);
-	glLinkProgram(p);
-	GLint ok = 0;
-	glGetProgramiv(p, GL_LINK_STATUS, &ok);
-	if (!ok) {
-		char log[2048];
-		glGetProgramInfoLog(p, sizeof(log), nullptr, log);
-		printf("[program link error]\n%s\n", log);
-	}
-	glDeleteShader(vs);
-	glDeleteShader(fs);
-	return p;
-}
+struct Mesh {
+	std::vector<glm::vec3> verts;
+	std::vector<glm::vec3> normals;
+};
 
 //------------------------------------------------------------------------------
 // Camera
@@ -190,8 +73,41 @@ struct Camera {
 };
 
 //------------------------------------------------------------------------------
-// Surface Snap Projections
+// Math Helpers (Raycasting & Surface Snap Projections)
 //------------------------------------------------------------------------------
+static glm::vec3 getRayFromMouse(double mouseX, double mouseY, int width, int height, const glm::mat4& view, const glm::mat4& proj) {
+	float x = (2.0f * (float)mouseX) / width - 1.0f;
+	float y = 1.0f - (2.0f * (float)mouseY) / height;
+	glm::vec4 rayClip(x, y, -1.0f, 1.0f);
+	glm::vec4 rayView = glm::inverse(proj) * rayClip;
+	rayView = glm::vec4(rayView.x, rayView.y, -1.0f, 0.0f);
+	return glm::normalize(glm::vec3(glm::inverse(view) * rayView));
+}
+
+static bool intersectSphere(glm::vec3 ro, glm::vec3 rd, float radius, float& t) {
+	float b = 2.0f * glm::dot(ro, rd);
+	float c = glm::dot(ro, ro) - radius * radius;
+	float disc = b * b - 4.0f * c;
+	if (disc < 0.0f) return false;
+	t = (-b - std::sqrt(disc)) / 2.0f;
+	return t >= 0.0f;
+}
+
+static bool intersectBox(glm::vec3 ro, glm::vec3 rd, glm::vec3 boxMin, glm::vec3 boxMax, float& t) {
+	glm::vec3 invR = 1.0f / (rd + glm::vec3(1e-6f));
+	glm::vec3 t0 = (boxMin - ro) * invR;
+	glm::vec3 t1 = (boxMax - ro) * invR;
+	glm::vec3 tmin = glm::min(t0, t1);
+	glm::vec3 tmax = glm::max(t0, t1);
+	float ta = std::max(tmin.x, std::max(tmin.y, tmin.z));
+	float tb = std::min(tmax.x, std::min(tmax.y, tmax.z));
+	if (ta <= tb && tb >= 0.0f) {
+		t = ta < 0.0f ? tb : ta;
+		return true;
+	}
+	return false;
+}
+
 static glm::vec3 projectToSurface(glm::vec3 p, int shapeType) {
 	if (shapeType == 1) { // Sphere
 		return glm::normalize(p) * 0.85f;
@@ -217,7 +133,7 @@ static glm::vec3 projectToSurface(glm::vec3 p, int shapeType) {
 }
 
 //------------------------------------------------------------------------------
-// Primitive Mesh Generative Helpers (Original Simpler Configurations Reverted)
+// Primitive Mesh Generative Helpers (Original Light Configurations)
 //------------------------------------------------------------------------------
 static Mesh makeCube() {
 	Mesh m;
@@ -285,7 +201,7 @@ static void generateBranch(std::vector<glm::vec3>& segA, std::vector<glm::vec3>&
 	glm::vec3 currDir = dir;
 
 	for (int i = 0; i < steps; ++i) {
-		if (segA.size() >= 90) return; // Hard safe cap allocation limit for standard fragment shaders
+		if (segA.size() >= 90) return;
 
 		glm::vec3 norm = glm::normalize(curr);
 		if (shapeType == 0) {
@@ -314,7 +230,6 @@ static void generateBranch(std::vector<glm::vec3>& segA, std::vector<glm::vec3>&
 
 		curr = nextPt;
 
-		// Sub-branch sprout trigger node calculation loop[cite: 5]
 		if (i > 3 && i < steps - 4 && ((double)rand() / (double)RAND_MAX) < 0.12 && segA.size() < 90) {
 			float splitAngle = (((double)rand() / (double)RAND_MAX) > 0.5 ? 1.0f : -1.0f) * 0.6f;
 			glm::vec3 subDir = glm::normalize(currDir * std::cos(splitAngle) + sideDir * std::sin(splitAngle));
@@ -324,7 +239,7 @@ static void generateBranch(std::vector<glm::vec3>& segA, std::vector<glm::vec3>&
 }
 
 //------------------------------------------------------------------------------
-// GPU upload
+// GPU upload configuration properties
 //------------------------------------------------------------------------------
 struct GPUMesh {
 	GLuint vao = 0, vboPos = 0, vboNorm = 0, ebo = 0;
@@ -378,7 +293,98 @@ static GPUMesh uploadMesh(const Mesh& m) {
 }
 
 //------------------------------------------------------------------------------
-// Application Entry and Workspace State
+// GLSL Shader Source (Analytical Fragment-Space Boolean Discard/Carve Engine)
+//------------------------------------------------------------------------------
+static const char* VERT_SRC = R"(#version 300 es
+layout(location = 0) in vec3 aPos;
+layout(location = 1) in vec3 aNormal;
+uniform mat4 M; uniform mat4 V; uniform mat4 P;
+out vec3 vNormal; out vec3 vFragPos;
+void main() {
+	vFragPos = vec3(M * vec4(aPos, 1.0));
+	vNormal = mat3(transpose(inverse(M))) * aNormal;
+	gl_Position = P * V * M * vec4(aPos, 1.0);
+}
+)";
+
+static const char* FRAG_SRC = R"(#version 300 es
+precision highp float;
+in vec3 vNormal; in vec3 vFragPos;
+uniform vec3 lightPos; uniform vec3 lightColor; uniform vec3 diffuseColor; uniform float ambientStrength;
+
+uniform vec3 uSegA[90]; uniform vec3 uSegB[90]; uniform int uSegCount;
+uniform float uCrackWidth; uniform float uCrackDepth; uniform int uCarveEnabled;
+out vec4 fragColor;
+
+void main() {
+	vec3 baseNormal = normalize(vNormal);
+	vec3 baseColor = diffuseColor;
+	
+	if (uCarveEnabled == 1 && uSegCount > 0) {
+		float minDst = 1e9;
+		vec3 closestLinePt = vec3(0.0);
+		for (int i = 0; i < uSegCount; ++i) {
+			vec3 a = uSegA[i]; vec3 b = uSegB[i];
+			vec3 ab = b - a; vec3 ap = vFragPos - a;
+			float t = clamp(dot(ap, ab) / (dot(ab, ab) + 1e-6), 0.0, 1.0);
+			vec3 closest = a + t * ab;
+			float dst = length(vFragPos - closest);
+			if (dst < minDst) { minDst = dst; closestLinePt = closest; }
+		}
+		float radius = uCrackWidth * 0.5;
+		if (minDst < radius) {
+			float falloff = 1.0 - (minDst / radius);
+			vec3 lateralVec = vFragPos - closestLinePt;
+			if (length(lateralVec) > 1e-5) lateralVec = normalize(lateralVec);
+			baseNormal = normalize(baseNormal + lateralVec * falloff * 2.0 * uCrackDepth);
+			baseColor = mix(diffuseColor, vec3(0.04), falloff);
+		}
+	}
+	vec3 lightDir = normalize(lightPos - vFragPos);
+	float diff = max(dot(baseNormal, lightDir), 0.0);
+	vec3 result = lightColor * (ambientStrength + diff) * baseColor;
+	fragColor = vec4(result, 1.0);
+}
+)";
+
+//------------------------------------------------------------------------------
+// Shader Pipeline Helpers
+//------------------------------------------------------------------------------
+static GLuint compileShader(GLenum type, const char* src) {
+	GLuint s = glCreateShader(type);
+	glShaderSource(s, 1, &src, nullptr);
+	glCompileShader(s);
+	GLint ok = 0;
+	glGetShaderiv(s, GL_COMPILE_STATUS, &ok);
+	if (!ok) {
+		char log[2048];
+		glGetShaderInfoLog(s, sizeof(log), nullptr, log);
+		printf("[shader compile error]\n%s\n", log);
+	}
+	return s;
+}
+
+static GLuint linkProgram(const char* vsrc, const char* fsrc) {
+	GLuint vs = compileShader(GL_VERTEX_SHADER, vsrc);
+	GLuint fs = compileShader(GL_FRAGMENT_SHADER, fsrc);
+	GLuint p = glCreateProgram();
+	glAttachShader(p, vs);
+	glAttachShader(p, fs);
+	glLinkProgram(p);
+	GLint ok = 0;
+	glGetProgramiv(p, GL_LINK_STATUS, &ok);
+	if (!ok) {
+		char log[2048];
+		glGetProgramInfoLog(p, sizeof(log), nullptr, log);
+		printf("[program link error]\n%s\n", log);
+	}
+	glDeleteShader(vs);
+	glDeleteShader(fs);
+	return p;
+}
+
+//------------------------------------------------------------------------------
+// Application Frame State
 //------------------------------------------------------------------------------
 struct App {
 	GLFWwindow* window = nullptr;
@@ -401,7 +407,7 @@ struct App {
 
 	int mainArms = 5;
 	float crackWidth = 0.06f;
-	float crackDepth = 0.45f; // Normal scaling factor
+	float crackDepth = 0.45f;
 	float crackJitter = 1.0f;
 	bool carveEnabled = false;
 
@@ -413,7 +419,7 @@ struct App {
 		previewLinesMesh.clear();
 		segStarts.clear();
 		segEnds.clear();
-		carveEnabled = false; // Reset bake status on adjustment
+		carveEnabled = false;
 
 		constexpr float TWO_PI = 6.28318530718f;
 		glm::vec3 norm = glm::normalize(activeStrikePoint);
@@ -432,7 +438,6 @@ struct App {
 			generateBranch(segStarts, segEnds, activeStrikePoint, armDir, 25, shapeIndex, crackJitter);
 		}
 
-		// Compile live indicator lines
 		Mesh lines;
 		for (size_t i = 0; i < segStarts.size(); ++i) {
 			lines.verts.push_back(segStarts[i] + glm::normalize(segStarts[i]) * 0.005f);
@@ -441,7 +446,6 @@ struct App {
 			lines.normals.push_back(glm::normalize(segEnds[i]));
 		}
 
-		// Upload raw vector strip
 		glGenVertexArrays(1, &previewLinesMesh.vao);
 		glBindVertexArray(previewLinesMesh.vao);
 		glGenBuffers(1, &previewLinesMesh.vboPos);
@@ -510,7 +514,7 @@ static void frame(void* arg) {
 	ImGui_ImplOpenGL3_NewFrame(); ImGui_ImplGlfw_NewFrame(); ImGui::NewFrame();
 
 	ImGui::Begin("Analytical Subtraction Workshop");
-	const char* shapes[] = {"Standard Box (12 Tris)", "Standard Sphere", "Standard Torus"};
+	const char* shapes[] = {"Standard Box", "Standard Sphere", "Standard Torus"};
 	if (ImGui::Combo("Base Primitive", &app.shapeIndex, shapes, 3)) {
 		app.activeStrikePoint = projectToSurface(glm::vec3(0.0f, 1.0f, 0.0f), app.shapeIndex);
 		app.updateFractureBlueprint();
@@ -536,12 +540,6 @@ static void frame(void* arg) {
 	if (ImGui::Button("Reset/Clear Subtraction", ImVec2(-1, 22))) {
 		app.carveEnabled = false;
 	}
-
-	ImGui::Spacing();
-	ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.0f, 1.0f), "PIXEL-PERFECT WORKFLOW:");
-	ImGui::TextWrapped("1. Right-Click on the simple shape surface to immediately calculate a complex skeleton footprint without polygon limits[cite: 5].");
-	ImGui::TextWrapped("2. Fine-tune parameters instantly without topological latency.");
-	ImGui::TextWrapped("3. Click 'Carve Model Volume' to perform the perfect infinite-resolution mathematical boolean cutout[cite: 5].");
 	ImGui::End();
 
 	if (app.autoRotate) app.camera.incrementPhi(-0.4f);
@@ -566,7 +564,6 @@ static void frame(void* arg) {
 	glUniform1f(glGetUniformLocation(app.program, "ambientStrength"), app.ambient);
 	glUniform3fv(glGetUniformLocation(app.program, "diffuseColor"), 1, glm::value_ptr(app.diffuseColor));
 
-	// Pass mathematical boolean uniform metrics directly into fragment block
 	glUniform1i(glGetUniformLocation(app.program, "uCarveEnabled"), app.carveEnabled ? 1 : 0);
 	glUniform1f(glGetUniformLocation(app.program, "uCrackWidth"), app.crackWidth);
 	glUniform1f(glGetUniformLocation(app.program, "uCrackDepth"), app.crackDepth);
@@ -577,17 +574,15 @@ static void frame(void* arg) {
 		glUniform3fv(glGetUniformLocation(app.program, "uSegB"), (GLsizei)app.segEnds.size(), glm::value_ptr(app.segEnds[0]));
 	}
 
-	// 1. Render host shape model
 	GPUMesh& hostMesh = app.hostMeshes[app.shapeIndex];
 	glBindVertexArray(hostMesh.vao);
 	if (app.wireframe) glDrawElements(GL_LINES, hostMesh.wireCount, GL_UNSIGNED_INT, (void*)0);
 	else glDrawArrays(GL_TRIANGLES, 0, hostMesh.count);
 
-	// 2. Render fracture alignment path vectors when previewing
 	if (!app.carveEnabled && app.previewLinesMesh.count > 0) {
 		glLineWidth(3.0f);
-		glUniform1i(glGetUniformLocation(app.program, "uCarveEnabled"), 0); // Disable carving changes on vector line draw pass
-		glUniform3f(glGetUniformLocation(app.program, "diffuseColor"), 0.0f, 1.0f, 0.4f); // Neon layout path indicator color
+		glUniform1i(glGetUniformLocation(app.program, "uCarveEnabled"), 0);
+		glUniform3f(glGetUniformLocation(app.program, "diffuseColor"), 0.0f, 1.0f, 0.4f);
 		glBindVertexArray(app.previewLinesMesh.vao);
 		glDrawArrays(GL_LINES, 0, app.previewLinesMesh.count);
 		glLineWidth(1.0f);
