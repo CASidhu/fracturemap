@@ -1,8 +1,3 @@
-// Minimal WebGL2 (via Emscripten) demo derived from the original desktop
-// OpenGL skeleton. The OBJ loader and mcut boolean-operation pipeline have
-// been replaced with procedurally generated shapes so the whole thing can
-// run with zero asset files and no native-only dependencies.
-
 #include <GLES3/gl3.h>
 #include <GLFW/glfw3.h>
 
@@ -19,24 +14,23 @@
 #include <cmath>
 #include <cstdio>
 #include <vector>
+#include <algorithm>
 
 #ifdef __EMSCRIPTEN__
-#include <GLFW/glfw3.h>
-
 extern "C" {
     int glfwGetError(const char** description) {
         if (description) *description = nullptr;
-        return 0; // Returns no error
+        return 0;
     }
 
     int glfwGetGamepadState(int jid, GLFWgamepadstate* state) {
-        return 0; // Returns GLFW_FALSE
+        return 0;
     }
 }
 #endif
 
 //------------------------------------------------------------------------------
-// Camera (ported from Camera.h/.cpp, trimmed)
+// Camera
 //------------------------------------------------------------------------------
 struct Camera {
 	float theta, phi, radius;
@@ -53,7 +47,7 @@ struct Camera {
 
 	void incrementTheta(float dt) {
 		float next = theta + dt / 100.f;
-		constexpr float limit = 1.5533f; // just under pi/2 to avoid gimbal flip
+		constexpr float limit = 1.5533f;
 		if (next < limit && next > -limit) theta = next;
 	}
 
@@ -70,7 +64,7 @@ struct Camera {
 };
 
 //------------------------------------------------------------------------------
-// Procedural geometry (replaces GeomLoaderForOBJ + HEGeometry for this demo)
+// Geometry Structures
 //------------------------------------------------------------------------------
 struct Mesh {
 	std::vector<glm::vec3> verts;
@@ -152,17 +146,110 @@ static Mesh makeTorus(int rings = 40, int sides = 20, float R = 0.6f, float r = 
 }
 
 //------------------------------------------------------------------------------
-// GPU upload (replaces GPU_Geometry/VertexArray/VertexBuffer for this demo)
+// Procedural Crack Generation Engine (Phenomenological Sweep Approach)
+//------------------------------------------------------------------------------
+static Mesh makeCrackModel(int shapeType, float crackWidth, float crackDepth, float noiseScale) {
+	Mesh m;
+	std::vector<glm::vec3> path;
+	constexpr float PI = 3.14159265358979f;
+
+	// 1. Generate perturbed 2D/3D crack trajectory skeleton based on the host shape
+	if (shapeType == 1) { // Sphere trajectory
+		float radius = 0.852f; // Sits slightly above host surface to prevent Z-fighting
+		int steps = 60;
+		float startPhi = 0.0f;
+		for (int i = 0; i < steps; ++i) {
+			float t = (float)i / (steps - 1);
+			float theta = PI * 0.3f + t * (PI * 0.4f); // Traverses mid-latitudes
+			float phi = startPhi + std::sin(t * PI * 2.5f) * 0.15f * noiseScale;
+			
+			glm::vec3 p(std::sin(theta) * std::cos(phi), std::cos(theta), std::sin(theta) * std::sin(phi));
+			path.push_back(p * radius);
+			startPhi += 0.04f;
+		}
+	} else if (shapeType == 0) { // Cube trajectory (Face-aligned segment layout)
+		int steps = 40;
+		float s = 0.652f;
+		for (int i = 0; i < steps; ++i) {
+			float t = (float)i / (steps - 1);
+			float x = -s + t * (s * 2.0f);
+			float y = s;
+			float z = std::sin(t * PI * 3.0f) * 0.12f * noiseScale;
+			path.push_back(glm::vec3(x, y, z));
+		}
+	} else { // Torus trajectory
+		int steps = 80;
+		float R = 0.6f, r = 0.252f;
+		for (int i = 0; i < steps; ++i) {
+			float t = (float)i / (steps - 1);
+			float u = t * (PI * 1.5f);
+			float v = std::sin(t * PI * 6.0f) * 0.4f * noiseScale;
+			
+			float cu = std::cos(u), su = std::sin(u);
+			float cv = std::cos(v), sv = std::sin(v);
+			path.push_back(glm::vec3((R + r * cv) * cu, r * sv, (R + r * cv) * su));
+		}
+	}
+
+	if (path.size() < 2) return m;
+
+	// 2. Sweep Profile Cross-Section (V-shaped fracture valley carving logic)
+	std::vector<glm::vec3> leftSide, rightSide, valleyFloor;
+
+	for (size_t i = 0; i < path.size(); ++i) {
+		glm::vec3 p = path[i];
+		glm::vec3 normal = glm::normalize(p); // Default spherical projection mapping
+		if (shapeType == 0) normal = glm::vec3(0.0f, 1.0f, 0.0f); // Top face normal flat projection
+
+		glm::vec3 forward;
+		if (i == 0) forward = glm::normalize(path[i + 1] - p);
+		else if (i == path.size() - 1) forward = glm::normalize(p - path[i - 1]);
+		else forward = glm::normalize(path[i + 1] - path[i - 1]);
+
+		glm::vec3 tangent = glm::normalize(glm::cross(forward, normal));
+
+		leftSide.push_back(p - tangent * (crackWidth * 0.5f));
+		rightSide.push_back(p + tangent * (crackWidth * 0.5f));
+		valleyFloor.push_back(p - normal * crackDepth); // Carves inward relative to surface normal
+	}
+
+	// 3. Tessellate the generated swept cross-section points into a continuous triangle strip
+	for (size_t i = 0; i < path.size() - 1; ++i) {
+		glm::vec3 l0 = leftSide[i],    l1 = leftSide[i + 1];
+		glm::vec3 r0 = rightSide[i],   r1 = rightSide[i + 1];
+		glm::vec3 v0 = valleyFloor[i], v1 = valleyFloor[i + 1];
+
+		// Left flank of the crack valley
+		m.verts.insert(m.verts.end(), {l0, v0, l1, v0, v1, l1});
+		glm::vec3 nl = glm::normalize(glm::cross(v0 - l0, l1 - l0));
+		m.normals.insert(m.normals.end(), {nl, nl, nl, nl, nl, nl});
+
+		// Right flank of the crack valley
+		m.verts.insert(m.verts.end(), {v0, r0, v1, r0, r1, v1});
+		glm::vec3 nr = glm::normalize(glm::cross(r1 - r0, v0 - r0));
+		m.normals.insert(m.normals.end(), {nr, nr, nr, nr, nr, nr});
+	}
+
+	return m;
+}
+
+//------------------------------------------------------------------------------
+// GPU upload
 //------------------------------------------------------------------------------
 struct GPUMesh {
 	GLuint vao = 0, vboPos = 0, vboNorm = 0, ebo = 0;
-	GLsizei count = 0;     // vertex count for the GL_TRIANGLES draw
-	GLsizei wireCount = 0; // index count for the wireframe GL_LINES draw
+	GLsizei count = 0;
+	GLsizei wireCount = 0;
+
+	void clear() {
+		if (vao) { glDeleteVertexArrays(1, &vao); vao = 0; }
+		if (vboPos) { glDeleteBuffers(1, &vboPos); vboPos = 0; }
+		if (vboNorm) { glDeleteBuffers(1, &vboNorm); vboNorm = 0; }
+		if (ebo) { glDeleteBuffers(1, &ebo); ebo = 0; }
+		count = 0; wireCount = 0;
+	}
 };
 
-// WebGL2/GLES3 has no glPolygonMode(GL_LINE) (that's desktop-GL-only), so
-// "wireframe" is implemented as an actual GL_LINES draw over a per-triangle
-// edge index buffer, built alongside the normal triangle-list buffers.
 static GPUMesh uploadMesh(const Mesh& m) {
 	GPUMesh g;
 	g.count = (GLsizei)m.verts.size();
@@ -192,7 +279,7 @@ static GPUMesh uploadMesh(const Mesh& m) {
 	g.wireCount = (GLsizei)wireIdx.size();
 
 	glGenBuffers(1, &g.ebo);
-	glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, g.ebo); // captured into the VAO's element-array binding
+	glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, g.ebo);
 	glBufferData(GL_ELEMENT_ARRAY_BUFFER, wireIdx.size() * sizeof(GLuint), wireIdx.data(), GL_STATIC_DRAW);
 
 	glBindVertexArray(0);
@@ -200,7 +287,7 @@ static GPUMesh uploadMesh(const Mesh& m) {
 }
 
 //------------------------------------------------------------------------------
-// Shaders (GLSL ES 300, i.e. WebGL2) - adapted from test.vert / test.frag
+// Shaders
 //------------------------------------------------------------------------------
 static const char* VERT_SRC = R"(#version 300 es
 layout(location = 0) in vec3 aPos;
@@ -276,15 +363,16 @@ static GLuint linkProgram(const char* vsrc, const char* fsrc) {
 }
 
 //------------------------------------------------------------------------------
-// App state + input handling
+// App State
 //------------------------------------------------------------------------------
 struct App {
 	GLFWwindow* window = nullptr;
 	Camera camera{glm::radians(20.f), glm::radians(35.f), 3.2f};
 
 	GLuint program = 0;
-	GPUMesh meshes[3];
-	int shapeIndex = 1; // 0 = cube, 1 = sphere, 2 = torus
+	GPUMesh hostMeshes[3];
+	GPUMesh crackMesh;
+	int shapeIndex = 1;
 
 	bool wireframe = false;
 	bool autoRotate = true;
@@ -295,6 +383,21 @@ struct App {
 	glm::vec3 lightColor{1.f, 1.f, 1.f};
 	glm::vec3 diffuseColor{0.85f, 0.2f, 0.25f};
 	float ambient = 0.15f;
+
+	// Crack parameters
+	bool showCracks = true;
+	float crackWidth = 0.04f;
+	float crackDepth = 0.03f;
+	float crackJitter = 1.0f;
+	glm::vec3 crackColor{0.08f, 0.08f, 0.08f}; // Dark indentation shadow signature
+
+	void updateCrackGeometry() {
+		crackMesh.clear();
+		Mesh m = makeCrackModel(shapeIndex, crackWidth, crackDepth, crackJitter);
+		if (m.verts.size() > 0) {
+			crackMesh = uploadMesh(m);
+		}
+	}
 };
 
 static void mouseButtonCB(GLFWwindow* w, int button, int action, int /*mods*/) {
@@ -322,7 +425,7 @@ static void scrollCB(GLFWwindow* w, double /*xoff*/, double yoff) {
 }
 
 //------------------------------------------------------------------------------
-// Per-frame callback, driven by the browser via emscripten_set_main_loop_arg
+// Per-Frame Loop Callback
 //------------------------------------------------------------------------------
 static void frame(void* arg) {
 	App& app = *(App*)arg;
@@ -335,15 +438,28 @@ static void frame(void* arg) {
 
 	ImGui::Begin("Controls");
 	const char* shapes[] = {"Cube", "Sphere", "Torus"};
-	ImGui::Combo("Shape", &app.shapeIndex, shapes, 3);
-	ImGui::Checkbox("Wireframe", &app.wireframe);
-	ImGui::Checkbox("Auto-rotate", &app.autoRotate);
-	ImGui::ColorEdit3("Object colour", &app.diffuseColor[0]);
-	ImGui::ColorEdit3("Light colour", &app.lightColor[0]);
-	ImGui::DragFloat3("Light position", &app.lightPos[0], 0.1f);
-	ImGui::SliderFloat("Ambient", &app.ambient, 0.0f, 1.0f);
+	if (ImGui::Combo("Host Shape", &app.shapeIndex, shapes, 3)) {
+		app.updateCrackGeometry();
+	}
+	ImGui::Checkbox("Wireframe View", &app.wireframe);
+	ImGui::Checkbox("Auto-rotate Base", &app.autoRotate);
+	ImGui::ColorEdit3("Object Base Colour", &app.diffuseColor[0]);
+	ImGui::SliderFloat("Ambient Intensity", &app.ambient, 0.0f, 1.0f);
+	
+	ImGui::Spacing();
 	ImGui::Separator();
-	ImGui::TextWrapped("Drag with left mouse button to orbit. Scroll to zoom.");
+	ImGui::Text("Fracture Pattern Configuration");
+	if (ImGui::Checkbox("Show Surface Cracks", &app.showCracks)) {
+		app.updateCrackGeometry();
+	}
+	if (app.showCracks) {
+		if (ImGui::SliderFloat("Crack Width", &app.crackWidth, 0.005f, 0.15f) ||
+			ImGui::SliderFloat("Crack Depth", &app.crackDepth, 0.005f, 0.10f) ||
+			ImGui::SliderFloat("Pattern Jitter", &app.crackJitter, 0.0f, 3.0f)) {
+			app.updateCrackGeometry();
+		}
+		ImGui::ColorEdit3("Fracture Valley Color", &app.crackColor[0]);
+	}
 	ImGui::End();
 
 	if (app.autoRotate) app.camera.incrementPhi(-0.6f);
@@ -367,15 +483,27 @@ static void frame(void* arg) {
 	glUniformMatrix4fv(glGetUniformLocation(app.program, "P"), 1, GL_FALSE, glm::value_ptr(P));
 	glUniform3fv(glGetUniformLocation(app.program, "lightPos"), 1, glm::value_ptr(app.lightPos));
 	glUniform3fv(glGetUniformLocation(app.program, "lightColor"), 1, glm::value_ptr(app.lightColor));
-	glUniform3fv(glGetUniformLocation(app.program, "diffuseColor"), 1, glm::value_ptr(app.diffuseColor));
 	glUniform1f(glGetUniformLocation(app.program, "ambientStrength"), app.ambient);
 
-	GPUMesh& mesh = app.meshes[app.shapeIndex];
+	// Render Base Primitive
+	glUniform3fv(glGetUniformLocation(app.program, "diffuseColor"), 1, glm::value_ptr(app.diffuseColor));
+	GPUMesh& mesh = app.hostMeshes[app.shapeIndex];
 	glBindVertexArray(mesh.vao);
 	if (app.wireframe) {
 		glDrawElements(GL_LINES, mesh.wireCount, GL_UNSIGNED_INT, (void*)0);
 	} else {
 		glDrawArrays(GL_TRIANGLES, 0, mesh.count);
+	}
+
+	// Render Procedural Fracture Mesh Overlays
+	if (app.showCracks && app.crackMesh.count > 0) {
+		glUniform3fv(glGetUniformLocation(app.program, "diffuseColor"), 1, glm::value_ptr(app.crackColor));
+		glBindVertexArray(app.crackMesh.vao);
+		if (app.wireframe) {
+			glDrawElements(GL_LINES, app.crackMesh.wireCount, GL_UNSIGNED_INT, (void*)0);
+		} else {
+			glDrawArrays(GL_TRIANGLES, 0, app.crackMesh.count);
+		}
 	}
 
 	ImGui::Render();
@@ -394,7 +522,7 @@ int main() {
 	glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 3);
 	glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 0);
 
-	static App app; // static: simplest way to give it a stable address for the JS-driven main loop
+	static App app;
 
 	app.window = glfwCreateWindow(900, 700, "Geometry Demo", nullptr, nullptr);
 	if (!app.window) {
@@ -414,9 +542,11 @@ int main() {
 	ImGui_ImplOpenGL3_Init("#version 300 es");
 
 	app.program = linkProgram(VERT_SRC, FRAG_SRC);
-	app.meshes[0] = uploadMesh(makeCube());
-	app.meshes[1] = uploadMesh(makeSphere());
-	app.meshes[2] = uploadMesh(makeTorus());
+	app.hostMeshes[0] = uploadMesh(makeCube());
+	app.hostMeshes[1] = uploadMesh(makeSphere());
+	app.hostMeshes[2] = uploadMesh(makeTorus());
+
+	app.updateCrackGeometry();
 
 	emscripten_set_main_loop_arg(frame, &app, 0, 1);
 	return 0;
