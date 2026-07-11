@@ -414,7 +414,7 @@ static GPUMesh uploadMesh(const Mesh& m) {
 //------------------------------------------------------------------------------
 struct App {
 	GLFWwindow* window = nullptr;
-	Camera camera{glm::radians(45.f), glm::radians(35.f), 3.2f}; // Default pitch at 45 degrees
+	Camera camera{glm::radians(60.f), glm::radians(35.f), 3.2f}; // Default pitch at 45 degrees
 
 	GLuint program = 0;
 	GPUMesh hostMeshes[3];
@@ -436,7 +436,7 @@ struct App {
 	float crackDepth = 0.02f;
 	float crackJitter = 1.0f;
 	glm::vec3 crackColor{0.08f, 0.08f, 0.08f};
-	glm::vec3 activeStrikePoint{0.0f, 0.6f, 0.25f}; // Snapped coordinate component initialization on Torus rim
+	glm::vec3 activeStrikePoint{0.0f, 0.85f, 0.0f}; // Snapped coordinate component initialization on Torus rim
 
 	void updateCrackGeometry() {
 		crackMesh.clear();
@@ -520,8 +520,8 @@ static void frame(void* arg) {
 	}
 	ImGui::ColorEdit3("Indentation Tint", &app.crackColor[0]);
 	ImGui::Spacing();
-	ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.0f, 1.0f), "INSTRUCTION:");
-	ImGui::TextWrapped("Right-Click directly on the object's surface to trigger a multi-arm branching fracture strike.");
+	ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.0f, 1.0f), "WIP");
+	ImGui::TextWrapped("");
 	ImGui::End();
 
 	if (app.autoRotate) app.camera.incrementPhi(-0.4f);
