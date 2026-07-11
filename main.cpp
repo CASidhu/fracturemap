@@ -140,10 +140,14 @@ static Mesh makeTorus(int rings = 40, int sides = 20, float R = 0.6f, float r = 
 // GPU upload (replaces GPU_Geometry/VertexArray/VertexBuffer for this demo)
 //------------------------------------------------------------------------------
 struct GPUMesh {
-	GLuint vao = 0, vboPos = 0, vboNorm = 0;
-	GLsizei count = 0;
+	GLuint vao = 0, vboPos = 0, vboNorm = 0, ebo = 0;
+	GLsizei count = 0;     // vertex count for the GL_TRIANGLES draw
+	GLsizei wireCount = 0; // index count for the wireframe GL_LINES draw
 };
 
+// WebGL2/GLES3 has no glPolygonMode(GL_LINE) (that's desktop-GL-only), so
+// "wireframe" is implemented as an actual GL_LINES draw over a per-triangle
+// edge index buffer, built alongside the normal triangle-list buffers.
 static GPUMesh uploadMesh(const Mesh& m) {
 	GPUMesh g;
 	g.count = (GLsizei)m.verts.size();
@@ -162,6 +166,19 @@ static GPUMesh uploadMesh(const Mesh& m) {
 	glBufferData(GL_ARRAY_BUFFER, m.normals.size() * sizeof(glm::vec3), m.normals.data(), GL_STATIC_DRAW);
 	glEnableVertexAttribArray(1);
 	glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, 0, (void*)0);
+
+	std::vector<GLuint> wireIdx;
+	wireIdx.reserve(m.verts.size() * 2);
+	for (GLuint i = 0; i + 2 < m.verts.size(); i += 3) {
+		wireIdx.push_back(i);     wireIdx.push_back(i + 1);
+		wireIdx.push_back(i + 1); wireIdx.push_back(i + 2);
+		wireIdx.push_back(i + 2); wireIdx.push_back(i);
+	}
+	g.wireCount = (GLsizei)wireIdx.size();
+
+	glGenBuffers(1, &g.ebo);
+	glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, g.ebo); // captured into the VAO's element-array binding
+	glBufferData(GL_ELEMENT_ARRAY_BUFFER, wireIdx.size() * sizeof(GLuint), wireIdx.data(), GL_STATIC_DRAW);
 
 	glBindVertexArray(0);
 	return g;
@@ -321,7 +338,6 @@ static void frame(void* arg) {
 	glViewport(0, 0, w, h);
 
 	glEnable(GL_DEPTH_TEST);
-	glPolygonMode(GL_FRONT_AND_BACK, app.wireframe ? GL_LINE : GL_FILL);
 	glClearColor(0.11f, 0.11f, 0.13f, 1.0f);
 	glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 
@@ -341,7 +357,11 @@ static void frame(void* arg) {
 
 	GPUMesh& mesh = app.meshes[app.shapeIndex];
 	glBindVertexArray(mesh.vao);
-	glDrawArrays(GL_TRIANGLES, 0, mesh.count);
+	if (app.wireframe) {
+		glDrawElements(GL_LINES, mesh.wireCount, GL_UNSIGNED_INT, (void*)0);
+	} else {
+		glDrawArrays(GL_TRIANGLES, 0, mesh.count);
+	}
 
 	ImGui::Render();
 	ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
