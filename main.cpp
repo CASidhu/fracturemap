@@ -217,7 +217,8 @@ static void generateBranch(std::vector<std::vector<glm::vec3>>& paths, glm::vec3
 
 		currDir = glm::normalize(currDir - glm::dot(currDir, norm) * norm);
 
-		float r1 = ((float)rand() / RAND_MAX) * 2.0f - 1.0f;
+		// Evaluated using double-precision division to satisfy -Wimplicit-const-int-float-conversion
+		float r1 = (float)((double)rand() / (double)RAND_MAX) * 2.0f - 1.0f;
 		glm::vec3 sideDir = glm::normalize(glm::cross(currDir, norm));
 		currDir = glm::normalize(currDir + sideDir * r1 * 0.35f * jitter);
 
@@ -227,9 +228,9 @@ static void generateBranch(std::vector<std::vector<glm::vec3>>& paths, glm::vec3
 		currentPath.push_back(nextPt);
 		curr = nextPt;
 
-		// 12% probability of growing a sub-arm structural node split
-		if (i > 2 && i < steps - 3 && ((float)rand() / RAND_MAX) < 0.12f && paths.size() < 16) {
-			float splitAngle = (((float)rand() / RAND_MAX) > 0.5f ? 1.0f : -1.0f) * 0.6f;
+		// 12% probability of growing a sub-arm structural node split[cite: 5]
+		if (i > 2 && i < steps - 3 && ((double)rand() / (double)RAND_MAX) < 0.12 && paths.size() < 16) {
+			float splitAngle = (((double)rand() / (double)RAND_MAX) > 0.5 ? 1.0f : -1.0f) * 0.6f;
 			glm::vec3 subDir = glm::normalize(currDir * std::cos(splitAngle) + sideDir * std::sin(splitAngle));
 			generateBranch(paths, curr, subDir, steps - i, shapeType, jitter);
 		}
@@ -376,6 +377,39 @@ void main() {
 	fragColor = vec4(result, 1.0);
 }
 )";
+
+static GLuint compileShader(GLenum type, const char* src) {
+	GLuint s = glCreateShader(type);
+	glShaderSource(s, 1, &src, nullptr);
+	glCompileShader(s);
+	GLint ok = 0;
+	glGetShaderiv(s, GL_COMPILE_STATUS, &ok);
+	if (!ok) {
+		char log[2048];
+		glGetShaderInfoLog(s, sizeof(log), nullptr, log);
+		printf("[shader compile error]\n%s\n", log);
+	}
+	return s;
+}
+
+static GLuint linkProgram(const char* vsrc, const char* fsrc) {
+	GLuint vs = compileShader(GL_VERTEX_SHADER, vsrc);
+	GLuint fs = compileShader(GL_FRAGMENT_SHADER, fsrc);
+	GLuint p = glCreateProgram();
+	glAttachShader(p, vs);
+	glAttachShader(p, fs);
+	glLinkProgram(p);
+	GLint ok = 0;
+	glGetProgramiv(p, GL_LINK_STATUS, &ok);
+	if (!ok) {
+		char log[2048];
+		glGetProgramInfoLog(p, sizeof(log), nullptr, log);
+		printf("[program link error]\n%s\n", log);
+	}
+	glDeleteShader(vs);
+	glDeleteShader(fs);
+	return p;
+}
 
 //------------------------------------------------------------------------------
 // Application Configuration Loop
