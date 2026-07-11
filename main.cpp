@@ -291,6 +291,35 @@ static Mesh makeStarburstCracks(glm::vec3 hitPoint, int numMainArms, int shapeTy
 }
 
 //------------------------------------------------------------------------------
+// Shader Setup
+//------------------------------------------------------------------------------
+static const char* VERT_SRC = R"(#version 300 es
+layout(location = 0) in vec3 aPos;
+layout(location = 1) in vec3 aNormal;
+uniform mat4 M; uniform mat4 V; uniform mat4 P;
+out vec3 vNormal; out vec3 vFragPos;
+void main() {
+	vFragPos = vec3(M * vec4(aPos, 1.0));
+	vNormal = mat3(transpose(inverse(M))) * aNormal;
+	gl_Position = P * V * M * vec4(aPos, 1.0);
+}
+)";
+
+static const char* FRAG_SRC = R"(#version 300 es
+precision highp float;
+in vec3 vNormal; in vec3 vFragPos;
+uniform vec3 lightPos; uniform vec3 lightColor; uniform vec3 diffuseColor; uniform float ambientStrength;
+out vec4 fragColor;
+void main() {
+	vec3 norm = normalize(vNormal);
+	vec3 lightDir = normalize(lightPos - vFragPos);
+	float diff = max(dot(norm, lightDir), 0.0);
+	vec3 result = lightColor * (ambientStrength + diff) * diffuseColor;
+	fragColor = vec4(result, 1.0);
+}
+)";
+
+//------------------------------------------------------------------------------
 // Shader Utilities
 //------------------------------------------------------------------------------
 static GLuint compileShader(GLenum type, const char* src) {
