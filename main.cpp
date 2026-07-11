@@ -20,6 +20,23 @@
 #include <cstdio>
 #include <vector>
 
+#ifdef __EMSCRIPTEN__
+#include <GLFW/glfw3.h>
+
+// Emscripten's GLFW3 emulation lacks these GLFW 3.3+ functions.
+// Providing stubs satisfies the linker since ImGui's GLFW backend references them.
+extern "C" {
+    const char* glfwGetError(const char** description) {
+        if (description) *description = nullptr;
+        return nullptr;
+    }
+
+    int glfwGetGamepadState(int jid, GLFWgamepadstate* state) {
+        return 0; // Returns GLFW_FALSE
+    }
+}
+#endif
+
 //------------------------------------------------------------------------------
 // Camera (ported from Camera.h/.cpp, trimmed)
 //------------------------------------------------------------------------------
