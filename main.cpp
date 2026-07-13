@@ -484,7 +484,7 @@ static GPUMesh uploadMesh(const Mesh& m) {
 //------------------------------------------------------------------------------
 struct App {
 	GLFWwindow* window = nullptr;
-	Camera camera{glm::radians(45.f), glm::radians(35.f), 3.2f};
+	Camera camera{glm::radians(80.f), glm::radians(35.f), 3.2f};
 
 	GLuint program = 0;
 	Mesh pristineMeshes[3];
@@ -493,7 +493,7 @@ struct App {
 	int shapeIndex = 2; // Default Torus
 
 	bool wireframe = true;
-	bool autoRotate = false;
+	bool autoRotate = true;
 	bool dragging = false;
 	double lastX = 0.0, lastY = 0.0;
 
@@ -503,12 +503,12 @@ struct App {
 	float ambient = 0.25f;
 
 	int mainArms = 5;
-	float crackWidth = 0.06f;
+	float crackWidth = 0.02f;
 	float crackDepth = 0.04f;
 	float crackJitter = 1.0f;
 	glm::vec3 previewColor{0.08f, 0.08f, 0.08f};
 	
-	glm::vec3 activeStrikePoint{0.0f, 0.6f, 0.25f};
+	glm::vec3 activeStrikePoint{0.0f, 0.85f, 0.0f};
 	std::vector<std::vector<glm::vec3>> calculatedPaths;
 	int activeVertexCount = 0;
 
@@ -609,33 +609,17 @@ static void frame(void* arg) {
 
 	ImGui_ImplOpenGL3_NewFrame(); ImGui_ImplGlfw_NewFrame(); ImGui::NewFrame();
 
-	ImGui::Begin("Adaptive Fracture Workshop");
+	ImGui::Begin("Web fracture");
 	const char* shapes[] = {"Low-Poly Box (12 Tris)", "Low-Poly Sphere", "Low-Poly Torus"};
-	if (ImGui::Combo("Base Architecture", &app.shapeIndex, shapes, 3)) {
-		app.activeStrikePoint = projectToSurface(glm::vec3(0.0f, 1.0f, 0.0f), app.shapeIndex);
-		app.updatePreviewModel();
-	}
-	ImGui::Checkbox("Wireframe Grid Matrix", &app.wireframe);
-	ImGui::Checkbox("Auto-Rotate Viewport", &app.autoRotate);
-	ImGui::ColorEdit3("Object Tone", &app.diffuseColor[0]);
 	
 	ImGui::Spacing(); ImGui::Separator();
-	ImGui::Text("Fracture Preview Configuration");
-	if (ImGui::SliderInt("Primary Arms", &app.mainArms, 2, 10) ||
-		ImGui::SliderFloat("Model Width", &app.crackWidth, 0.02f, 0.15f) ||
-		ImGui::SliderFloat("Model Depth", &app.crackDepth, 0.005f, 0.12f) ||
-		ImGui::SliderFloat("Spine Jitter", &app.crackJitter, 0.0f, 2.5f)) {
+	if (ImGui::SliderInt("Primary Arms", &app.mainArms, 2, 10)) {
 		app.updatePreviewModel();
 	}
-	ImGui::ColorEdit3("Trace Line Color", &app.previewColor[0]);
 	
 	ImGui::Spacing(); ImGui::Separator();
-	ImGui::TextColored(ImVec4(0.2f, 1.0f, 0.4f, 1.0f), "ADAPTIVE TSG BAKING:");
 	if (ImGui::Button("Carve Model Volume", ImVec2(-1, 30))) {
 		app.bakeVolumeCarve();
-	}
-	if (ImGui::Button("Clear/Reset Carving", ImVec2(-1, 22))) {
-		app.resetHostGeometry();
 	}
 
 	ImGui::Spacing(); ImGui::Separator();
@@ -643,10 +627,6 @@ static void frame(void* arg) {
 	ImGui::Text("Allocated Vertices: %d", app.activeVertexCount);
 	ImGui::Text("Allocated Triangles: %d", app.activeVertexCount / 3);
 
-	ImGui::Spacing();
-	ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.0f, 1.0f), "WORKFLOW INSTRUCTION:");
-	ImGui::TextWrapped("1. Right-Click on the surface to instantly compute the fracture blueprint line path[cite: 5].");
-	ImGui::TextWrapped("2. Watch the 'Allocated Vertices' count jump up locally only near the fracture zone when clicking 'Carve Model Volume'[cite: 5].");
 	ImGui::End();
 
 	if (app.autoRotate) app.camera.incrementPhi(-0.4f);
